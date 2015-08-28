@@ -34,10 +34,10 @@ import Data.Maybe
 import Data.Monoid
 import Data.Serialize (Serialize)
 import Data.Traversable
-import Distribution.Helper
+import Distribution.Helper hiding (Programs(..))
+import qualified Distribution.Helper as CH
 import qualified Language.Haskell.GhcMod.Types as T
-import Language.Haskell.GhcMod.Types hiding (ghcProgram, ghcPkgProgram,
-                                             cabalProgram)
+import Language.Haskell.GhcMod.Types
 import Language.Haskell.GhcMod.Monad.Types
 import Language.Haskell.GhcMod.Utils
 import Language.Haskell.GhcMod.PathsAndFiles
@@ -145,6 +145,18 @@ getStackPackageDbStack = do
         localDb <- liftIO $ readProcess stack ["path", "--local-pkg-db"] ""
         return $ map (PackageDb . takeWhile (/='\n')) [snapshotDb, localDb]
 
+patchStackPrograms :: IOish m => Cradle -> Programs -> m Programs
+patchStackPrograms crdl progs
+    | cradleProjectType crdl /= StackProject = return progs
+patchStackPrograms crdl progs = do
+  let projdir = cradleRootDir crdl
+  Just ghc <- liftIO $ getStackGhcPath projdir
+  Just ghcPkg <- liftIO $ getStackGhcPkgPath projdir
+  return $ progs {
+      ghcProgram = ghc
+    , ghcPkgProgram = ghcPkg
+    }
+
 withCabal :: (IOish m, GmEnv m, GmLog m) => m a -> m a
 withCabal action = do
     crdl <- cradle
@@ -163,7 +175,7 @@ withCabal action = do
     pkgDbStackOutOfSync <-
          case mCusPkgDbStack of
            Just cusPkgDbStack -> do
-             pkgDb <- runQuery'' readProc (helperProgs opts) projdir distdir $
+             pkgDb <- runQuery'' readProc (helperProgs $ programs opts) projdir distdir $
                  map chPkgToGhcPkg <$> packageDbStack
              return $ pkgDb /= cusPkgDbStack
 
@@ -185,31 +197,40 @@ withCabal action = do
         || isSetupConfigOutOfDate mCabalSandboxConfig mCabalConfig) $
           case projType of
             CabalProject ->
-                cabalReconfigure readProc opts crdl projdir distdir
+                cabalReconfigure readProc (programs opts) crdl projdir distdir
             StackProject ->
+                stackReconfigure readProc (programs opts) crdl projdir distdir
                 -- https://github.com/commercialhaskell/stack/issues/820
-                gmLog GmWarning "" $ strDoc $ "Stack project configuration is out of date, please reconfigure manually using 'stack build'"
+
             _ ->
                 error $ "withCabal: unsupported project type: " ++ show projType
 
     action
 
  where
-   cabalReconfigure readProc opts crdl projdir distdir = do
+   cabalReconfigure readProc progs crdl projdir distdir = do
      withDirectory_ (cradleRootDir crdl) $ do
         cusPkgStack <- maybe [] ((PackageDb "clear"):) <$> getCustomPkgDbStack
         let progOpts =
-                [ "--with-ghc=" ++ T.ghcProgram opts ]
+                [ "--with-ghc=" ++ T.ghcProgram progs ]
                 -- Only pass ghc-pkg if it was actually set otherwise we
                 -- might break cabal's guessing logic
-                ++ if T.ghcPkgProgram opts /= T.ghcPkgProgram defaultOptions
-                     then [ "--with-ghc-pkg=" ++ T.ghcPkgProgram opts ]
+                ++ if T.ghcPkgProgram progs /= T.ghcPkgProgram (programs defaultOptions)
+                     then [ "--with-ghc-pkg=" ++ T.ghcPkgProgram progs ]
                      else []
                 ++ map pkgDbArg cusPkgStack
-        liftIO $ void $ readProc (T.cabalProgram opts) ("configure":progOpts) ""
+        liftIO $ void $ readProc (T.cabalProgram progs) ("configure":progOpts) ""
         gmLog GmDebug "" $ strDoc $ "writing Cabal autogen files"
         liftIO $ writeAutogenFiles readProc projdir distdir
 
+   stackReconfigure readProc progs crdl projdir distdir = do
+     withDirectory_ (cradleRootDir crdl) $ do
+       spawn [T.stackProgram progs, "build", "--only-dependencies"]
+       spawn [T.stackProgram progs, "build", "--only-configure"]
+
+   spawn (exe:args) = do
+     readProc <- gmReadProcess
+     liftIO $ void $ readProc exe args ""
 
 pkgDbArg :: GhcPkgDb -> String
 pkgDbArg GlobalDb      = "--package-db=global"
@@ -233,12 +254,12 @@ isSetupConfigOutOfDate :: Maybe TimedFile -> Maybe TimedFile -> Bool
 isSetupConfigOutOfDate worldCabalFile worldCabalConfig = do
   worldCabalConfig < worldCabalFile
 
-helperProgs :: Options -> Programs
-helperProgs opts = Programs {
-                            cabalProgram  = T.cabalProgram opts,
-                            ghcProgram    = T.ghcProgram opts,
-                            ghcPkgProgram = T.ghcPkgProgram opts
-                          }
+helperProgs :: Programs -> CH.Programs
+helperProgs progs = CH.Programs {
+    cabalProgram  = T.cabalProgram progs,
+    ghcProgram    = T.ghcProgram progs,
+    ghcPkgProgram = T.ghcPkgProgram progs
+  }
 
 chCached :: (Applicative m, IOish m, GmEnv m, GmState m, GmLog m, Serialize a)
   => (FilePath -> Cached m GhcModState ChCacheData a) -> m a
@@ -252,7 +273,9 @@ chCached c = do
    -- changes the cache files will be gone anyways ;)
    cacheInputData root = do
                opt <- options
-               return $ ( helperProgs opt
+               crdl <- cradle
+               progs <- patchStackPrograms crdl (programs opt)
+               return $ ( helperProgs progs
                         , root
                         , (gmVer, chVer)
                         )
