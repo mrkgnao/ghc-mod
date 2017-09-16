@@ -1,0 +1,23 @@
+# List first the packages that you edit locally and want compiled "all the time", by cabal:
+local-packages:
+  ghc-mod:
+    location: .    # location on your disk
+
+# Optional: list patched or cutting edge packages that you depend on.
+# These will be compiled only once, by nix.
+    # revision: cc9a31305421f6bc72cc1f107f1270bd178c78a1 # optional
+
+source-deps:
+  cabal-helper:
+    location: https://github.com/DanielG/cabal-helper.git
+
+# If you want you can add other haskell nix packages to depend on.
+# Normally this is not necessary, because nix will track the dependencies on its own.
+# Thus this section is mostly useful for throw-away projects which do not have a cabal file.
+
+# Optionally, one can ask for a specific version of nixpkgs:
+nixpkgs:
+  url: https://github.com/NixOS/nixpkgs.git
+
+# Optionally, one can ask for a specific version of ghc known by nixpkgs
+default-compiler: ghc821

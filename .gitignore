@@ -1,4 +1,6 @@
 dist/
+dist-newstyle/
+.styx/
 elisp/*.elc
 *~
 /.cabal-sandbox/
